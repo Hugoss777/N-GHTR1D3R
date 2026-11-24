@@ -1,0 +1,119 @@
+# HUNTER SCALPER 7.0 - запуск на GitHub Actions
+#
+# Положи файл ТОЧНО сюда: .github/workflows/hunter_scalper.yml (в корне репозитория).
+# GitHub читает workflow только из этой папки.
+#
+# Как это работает:
+#   * Джоб в Actions живёт максимум 6 часов, поэтому бот работает ~5ч40м и перезапускается сам.
+#   * concurrency: одновременно работает только ОДИН запуск (дубли сигналов исключены).
+#   * Состояние (state) и журнал (journal) переносятся между запусками через кэш,
+#     журнал дополнительно выгружается артефактом (Actions -> запуск -> Artifacts).
+#   * Настройки берутся из hunter_scalper_config.yml в репозитории.
+#     Токен и chat id - из Secrets (Settings -> Secrets and variables -> Actions):
+#     TELEGRAM_TOKEN и TELEGRAM_CHAT_ID.
+#   * Cron раз в 6 часов - страховка, если цепочка самоперезапуска оборвалась.
+#
+# АВАРИЙНЫЙ ВЫКЛЮЧАТЕЛЬ: Settings -> Secrets and variables -> Actions -> вкладка Variables ->
+#   New repository variable: BOT_ENABLED = false. Новые запуски перестанут стартовать;
+#   текущий запуск можно сразу остановить кнопкой Cancel на странице запуска.
+#   Чтобы включить обратно: поставь true или удали переменную.
+#
+# ЛОГИ БЕЗ ЗАХОДА В ACTIONS: каждые ~20 минут журнал, хвост лога и сводка автостопа
+#   публикуются в ветку hunter-data этого репозитория (скрипт publish_hunter_data.sh).
+
+name: Hunter Scalper
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: hunter-scalper
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # публикация журнала в ветку hunter-data
+  actions: write   # нужно, чтобы запустить следующий запуск после завершения этого
+
+jobs:
+  run-bot:
+    if: ${{ vars.BOT_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install ccxt pandas numpy requests pyyaml
+
+      - name: Restore state and journal
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            hunter_scalper7_state.json
+            hunter_scalper_journal.csv
+          key: hunter-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            hunter-state-
+
+      - name: Run bot
+        id: bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          start=$(date +%s)
+          # Фоновая публикация журнала/лога в ветку hunter-data каждые 20 минут.
+          ( while true; do sleep 1200; bash publish_hunter_data.sh || true; done ) &
+          publisher=$!
+          timeout -s INT 340m python hunter_scalper_7.py || code=$?
+          kill "$publisher" 2>/dev/null || true
+          elapsed=$(( $(date +%s) - start ))
+          echo "bot exit code: ${code:-0}, worked ${elapsed}s"
+          # Перезапускаем себя только если бот реально проработал (защита от цикла быстрых падений).
+          if [ "$elapsed" -ge 1800 ]; then
+            echo "restart=true" >> "$GITHUB_OUTPUT"
+          fi
+          # 0 = штатно, 124 = закончилось время (ожидаемо). Всё остальное = ошибка.
+          [ "${code:-0}" -eq 0 ] || [ "${code:-0}" -eq 124 ]
+
+      - name: Save state and journal
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            hunter_scalper7_state.json
+            hunter_scalper_journal.csv
+          key: hunter-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Publish journal to hunter-data branch
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash publish_hunter_data.sh || true
+
+      - name: Upload journal and log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hunter-journal-${{ github.run_id }}
+          path: |
+            hunter_scalper_journal.csv
+            hunter_scalper.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Start next run
+        if: ${{ !cancelled() && steps.bot.outputs.restart == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run hunter_scalper.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
