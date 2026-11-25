@@ -1,2 +1,2 @@
-ccxt>=4.4
-requests>=2.31
+requests>=2.32.0
+ccxt>=4.4.0
