@@ -1,0 +1,50 @@
+name: GPT 2.1 scan
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+# Never run two scans at once: they would share one state file.
+concurrency:
+  group: gpt21-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # A GitHub runner is wiped after every run. The cooldown state lives in
+      # the Actions cache: restore the newest one, save a fresh one at the end.
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: gpt21_state.json
+          key: gpt21-state-${{ github.run_id }}
+          restore-keys: gpt21-state-
+
+      - name: Scan
+        run: python gpt_2_1.py
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: gpt21_state.json
+          key: gpt21-state-${{ github.run_id }}
