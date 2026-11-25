@@ -1,0 +1,70 @@
+name: GPT 2.2 QUANT
+
+on:
+  # Запуск каждые 15 минут (GitHub использует UTC).
+  schedule:
+    - cron: "*/15 * * * *"
+  # Ручной запуск из вкладки Actions.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpt-quant-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests ccxt
+
+      # Восстанавливаем состояние между запусками, чтобы cooldown
+      # не сбрасывался при каждом новом GitHub Actions job.
+      - name: Restore bot state
+        uses: actions/cache/restore@v4
+        with:
+          path: gpt21_state.json
+          key: gpt-quant-state-${{ github.run_id }}
+          restore-keys: |
+            gpt-quant-state-
+
+      - name: Run trading signal scanner
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EXCHANGES: bitunix,bingx
+          MIN_SCORE: "60"
+          MIN_QUOTE_VOLUME: "750000"
+          MIN_VOLUME_RATIO: "1.05"
+          COOLDOWN_BARS: "6"
+          MAX_TARGET_ATR: "6.0"
+          MIN_RR: "1.2"
+          MAX_SIGNAL_AGE_BARS: "2"
+          MAX_SIGNALS_PER_RUN: "10"
+          MAX_RUNTIME_SEC: "600"
+          QUIET_END_HOUR: "7"
+          STATE_FILE: gpt21_state.json
+        run: python gpt_2_2_quant.py
+
+      - name: Save bot state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: gpt21_state.json
+          key: gpt-quant-state-${{ github.run_id }}
